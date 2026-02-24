@@ -240,15 +240,15 @@ class HeatApp:
 
         self.create_block(content, "Материал", [
             "Плотность", "Теплоёмкость", "Теплопроводность", "Длина"
-        ], defaults=["7800", "460", "46", "0.4"])
+        ], defaults=["8960", "385", "401", "0.1"])
 
         self.create_block(content, "Температура", [
             "Начальная", "Слева", "Справа"
-        ], defaults=["20", "0", "200"])
+        ], defaults=["20", "200", "20"])
 
         self.create_block(content, "Расчёт", [
             "Шаг пространства", "Шаг времени", "Время моделирования"
-        ], defaults=["0.01", "0.1", "10"])
+        ], defaults=["0.01", "0.01", "2"])
 
         ttk.Frame(content, height=1, style="TFrame").pack(fill=tk.X, pady=12)
         ttk.Separator(content, orient="horizontal").pack(fill=tk.X)
