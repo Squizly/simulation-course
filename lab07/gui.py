@@ -1,8 +1,14 @@
 import sys
+import csv
+import os
+from datetime import datetime
+
 import numpy as np
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPushButton, QSlider, QFrame, 
-                             QGridLayout, QLineEdit, QProgressBar, QGraphicsDropShadowEffect)
+                             QGridLayout, QLineEdit, QProgressBar, QGraphicsDropShadowEffect,
+                             QFileDialog, QMessageBox, QDialog, QTableWidget, 
+                             QTableWidgetItem, QHeaderView, QSizePolicy)
 from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QDoubleValidator, QColor
 
@@ -139,6 +145,264 @@ class StyledButton(QPushButton):
         self.base_color = color
         self.update_style()
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📊 ДИАЛОГ СТАТИСТИКИ
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class StatisticsDialog(QDialog):
+    """
+    Диалог отображения статистики и сохранения в CSV.
+    Показывает теоретическое и эмпирическое распределения,
+    абсолютное отклонение, матрицу Q и время симуляции.
+    """
+    def __init__(self, stats: dict, parent=None):
+        super().__init__(parent)
+        self.stats = stats
+        self.setWindowTitle("📊 Статистическая обработка")
+        self.setMinimumSize(640, 520)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {Colors.BG_DARK};
+            }}
+            QLabel {{
+                color: {Colors.TEXT_PRIMARY};
+            }}
+            QTableWidget {{
+                background: {Colors.BG_INPUT};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 10px;
+                gridline-color: {Colors.BORDER};
+                font-size: 13px;
+            }}
+            QTableWidget::item {{
+                padding: 8px 12px;
+            }}
+            QTableWidget::item:selected {{
+                background: {Colors.ACCENT_PRIMARY};
+            }}
+            QHeaderView::section {{
+                background: {Colors.BG_CARD_HOVER};
+                color: {Colors.TEXT_SECONDARY};
+                border: none;
+                border-bottom: 1px solid {Colors.BORDER};
+                padding: 8px 12px;
+                font-weight: bold;
+                font-size: 12px;
+                letter-spacing: 0.5px;
+            }}
+            QScrollBar:vertical {{
+                background: {Colors.BG_CARD};
+                width: 8px;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {Colors.BORDER_HOVER};
+                border-radius: 4px;
+            }}
+        """)
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 28, 28, 28)
+        root.setSpacing(20)
+
+        # ── Заголовок ──────────────────────────────────────────────────────────
+        hdr = QHBoxLayout()
+        icon = QLabel("📊")
+        icon.setFont(QFont("Arial", 28))
+        title = QLabel("Статистическая обработка")
+        title.setFont(QFont("SF Pro Display", 20, QFont.Weight.Bold))
+        subtitle = QLabel(f"Время симуляции: {self.stats['total_time']:.2f} ед.")
+        subtitle.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 13px;")
+        
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        title_col.addWidget(title)
+        title_col.addWidget(subtitle)
+        
+        hdr.addWidget(icon)
+        hdr.addSpacing(8)
+        hdr.addLayout(title_col)
+        hdr.addStretch()
+        root.addLayout(hdr)
+
+        # ── Разделитель ────────────────────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"background: {Colors.BORDER}; max-height: 1px;")
+        root.addWidget(sep)
+
+        # ── Таблица распределений ──────────────────────────────────────────────
+        dist_label = QLabel("Распределение вероятностей по состояниям")
+        dist_label.setFont(QFont("SF Pro Display", 13, QFont.Weight.Medium))
+        dist_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        root.addWidget(dist_label)
+
+        self.table = QTableWidget(3, 4)
+        self.table.setHorizontalHeaderLabels([
+            "Состояние", "Теоретическое π", "Эмпирическое", "Отклонение |Δ|"
+        ])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setFixedHeight(148)
+
+        state_names = ["☀️ Ясно", "⛅ Облачно", "☁️ Пасмурно"]
+        theo = self.stats["theoretical_pi"]
+        emp  = self.stats["empirical_pi"]
+
+        for row, (name, t, e) in enumerate(zip(state_names, theo, emp)):
+            delta = abs(t - e)
+            
+            # Цвет отклонения
+            if delta < 0.05:
+                delta_color = Colors.ACCENT_SUCCESS
+            elif delta < 0.12:
+                delta_color = Colors.ACCENT_WARNING
+            else:
+                delta_color = Colors.ACCENT_DANGER
+
+            items = [
+                (name,          Colors.TEXT_PRIMARY),
+                (f"{t:.4f}",   Colors.CHART_BLUE),
+                (f"{e:.4f}",   Colors.CHART_PINK),
+                (f"{delta:.4f}", delta_color),
+            ]
+            for col, (text, color) in enumerate(items):
+                item = QTableWidgetItem(text)
+                item.setForeground(QColor(color))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row, col, item)
+
+        root.addWidget(self.table)
+
+        # ── Матрица Q ──────────────────────────────────────────────────────────
+        q_label = QLabel("Матрица интенсивностей Q")
+        q_label.setFont(QFont("SF Pro Display", 13, QFont.Weight.Medium))
+        q_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
+        root.addWidget(q_label)
+
+        q_table = QTableWidget(3, 3)
+        q_table.setHorizontalHeaderLabels(["→ Ясно", "→ Облачно", "→ Пасмурно"])
+        q_table.setVerticalHeaderLabels(["Ясно →", "Облачно →", "Пасмурно →"])
+        q_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        q_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        q_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        q_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        q_table.setFixedHeight(130)
+        q_table.setStyleSheet(q_table.styleSheet())  # наследует от диалога
+
+        Q = self.stats["Q"]
+        for i in range(3):
+            for j in range(3):
+                val = Q[i][j]
+                color = Colors.ACCENT_DANGER if i == j else Colors.TEXT_PRIMARY
+                item = QTableWidgetItem(f"{val:.4f}")
+                item.setForeground(QColor(color))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                q_table.setItem(i, j, item)
+
+        root.addWidget(q_table)
+
+        root.addStretch()
+
+        # ── Кнопки ─────────────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+
+        self.btn_save = StyledButton("💾  Сохранить CSV", Colors.ACCENT_PRIMARY)
+        self.btn_save.clicked.connect(self.save_csv)
+
+        btn_close = StyledButton("✕  Закрыть", Colors.ACCENT_DANGER)
+        btn_close.clicked.connect(self.close)
+
+        btn_row.addWidget(self.btn_save)
+        btn_row.addWidget(btn_close)
+        root.addLayout(btn_row)
+
+    def save_csv(self):
+        """Сохраняет полную статистику в CSV-файл через диалог выбора пути."""
+        default_name = f"collected_data/markov_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить статистику", default_name,
+            "CSV файлы (*.csv);;Все файлы (*)"
+        )
+        if not path:
+            return  # пользователь отменил
+
+        theo = self.stats["theoretical_pi"]
+        emp  = self.stats["empirical_pi"]
+        Q    = self.stats["Q"]
+        state_names = ["Ясно", "Облачно", "Пасмурно"]
+
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f, delimiter=";")
+
+                # --- Мета-информация ---
+                writer.writerow(["Марковская модель погоды — Статистика симуляции"])
+                writer.writerow(["Дата/время экспорта", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+                writer.writerow(["Общее время симуляции (ед.)", f"{self.stats['total_time']:.4f}"])
+                writer.writerow([])
+
+                # --- Распределение вероятностей ---
+                writer.writerow(["=== Распределение вероятностей ==="])
+                writer.writerow(["Состояние", "Теоретическое (π)", "Эмпирическое", "Отклонение |Δ|"])
+                for name, t, e in zip(state_names, theo, emp):
+                    writer.writerow([name, f"{t:.6f}", f"{e:.6f}", f"{abs(t - e):.6f}"])
+                writer.writerow([])
+
+                # --- Матрица Q ---
+                writer.writerow(["=== Матрица интенсивностей Q ==="])
+                writer.writerow([""] + [f"→ {n}" for n in state_names])
+                for i, row_name in enumerate(state_names):
+                    writer.writerow([f"{row_name} →"] + [f"{Q[i][j]:.6f}" for j in range(3)])
+                writer.writerow([])
+
+                # --- Время в каждом состоянии ---
+                writer.writerow(["=== Время пребывания в состояниях ==="])
+                writer.writerow(["Состояние", "Время (ед.)", "Доля (%)"])
+                total = self.stats["total_time"]
+                for name, dur in zip(state_names, self.stats["durations"]):
+                    pct = (dur / total * 100) if total > 0 else 0
+                    writer.writerow([name, f"{dur:.4f}", f"{pct:.2f}"])
+
+            # Уведомление об успехе
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Успешно")
+            msg.setText(f"✅ Файл сохранён:\n{path}")
+            msg.setStyleSheet(f"""
+                QMessageBox {{
+                    background: {Colors.BG_DARK};
+                    color: {Colors.TEXT_PRIMARY};
+                }}
+                QLabel {{
+                    color: {Colors.TEXT_PRIMARY};
+                    font-size: 13px;
+                }}
+                QPushButton {{
+                    background: {Colors.ACCENT_PRIMARY};
+                    color: white;
+                    border: none;
+                    border-radius: 8px;
+                    padding: 8px 20px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background: #818CF8;
+                }}
+            """)
+            msg.exec()
+
+        except OSError as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл:\n{e}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🎯 ГЛАВНОЕ ПРИЛОЖЕНИЕ
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -167,7 +431,6 @@ class WeatherSimApp(QMainWindow):
         self.resize(1150, 750)
         self.setMinimumSize(900, 600)
         
-        # Глобальные стили
         self.setStyleSheet(f"""
             QMainWindow {{
                 background-color: {Colors.BG_DARK};
@@ -220,6 +483,10 @@ class WeatherSimApp(QMainWindow):
         right_panel.addWidget(self.create_chart_panel(), stretch=3)
         main_layout.addLayout(right_panel, stretch=2)
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Панели UI (без изменений по сравнению с оригиналом, кроме кнопки статистики)
+    # ──────────────────────────────────────────────────────────────────────────
+
     def create_matrix_panel(self):
         frame = GlowingCard()
         frame.setStyleSheet(f"""
@@ -234,7 +501,6 @@ class WeatherSimApp(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
         
-        # Заголовок с иконкой
         header_layout = QHBoxLayout()
         icon_label = QLabel("📊")
         icon_label.setFont(QFont("Arial", 20))
@@ -246,7 +512,6 @@ class WeatherSimApp(QMainWindow):
         header_layout.addStretch()
         layout.addLayout(header_layout)
 
-        # Сетка матрицы
         grid_container = QFrame()
         grid_container.setStyleSheet(f"""
             background: {Colors.BG_INPUT};
@@ -261,14 +526,12 @@ class WeatherSimApp(QMainWindow):
         labels = ["☀️ Ясно", "⛅ Облачно", "☁️ Пасмурно"]
         short_labels = ["☀️", "⛅", "☁️"]
         
-        # Заголовки столбцов
         for i, lbl in enumerate(short_labels):
             header = QLabel(lbl)
             header.setFont(QFont("Arial", 16))
             header.setAlignment(Qt.AlignmentFlag.AlignCenter)
             grid.addWidget(header, 0, i+1)
         
-        # Заголовки строк и ячейки
         defaults = {
             (0,1): "0.3", (0,2): "0.1", 
             (1,0): "0.4", (1,2): "0.4", 
@@ -349,7 +612,7 @@ class WeatherSimApp(QMainWindow):
         header_layout.addStretch()
         layout.addLayout(header_layout)
 
-        # Кнопки
+        # Старт / Сброс
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
         
@@ -362,6 +625,11 @@ class WeatherSimApp(QMainWindow):
         btn_layout.addWidget(self.btn_start)
         btn_layout.addWidget(self.btn_reset)
         layout.addLayout(btn_layout)
+
+        # ── Кнопка статистики ─────────────────────────────────────────────────
+        self.btn_stats = StyledButton("📊  Статистика и CSV", Colors.ACCENT_INFO)
+        self.btn_stats.clicked.connect(self.show_statistics)
+        layout.addWidget(self.btn_stats)
 
         # Ползунок скорости
         speed_container = QFrame()
@@ -390,9 +658,7 @@ class WeatherSimApp(QMainWindow):
         
         layout.addWidget(speed_container)
 
-        # ═══════════════════════════════════════════════════════════════
-        # 📜 ИСТОРИЯ ПЕРЕХОДОВ (ИСПРАВЛЕННАЯ)
-        # ═══════════════════════════════════════════════════════════════
+        # История переходов
         history_container = QFrame()
         history_container.setStyleSheet(f"""
             background: {Colors.BG_INPUT};
@@ -405,7 +671,6 @@ class WeatherSimApp(QMainWindow):
         history_header.setFont(QFont("SF Pro Display", 12, QFont.Weight.Medium))
         history_layout.addWidget(history_header)
         
-        # Контейнер фиксированного размера для эмодзи
         self.history_frame = QFrame()
         self.history_frame.setFixedHeight(56)
         self.history_frame.setStyleSheet(f"""
@@ -418,7 +683,6 @@ class WeatherSimApp(QMainWindow):
         self.history_items_layout.setContentsMargins(12, 8, 12, 8)
         self.history_items_layout.setSpacing(4)
         
-        # Создаём 5 фиксированных слотов для эмодзи
         self.history_slots = []
         for i in range(5):
             slot = QLabel("")
@@ -429,12 +693,13 @@ class WeatherSimApp(QMainWindow):
             self.history_slots.append(slot)
             self.history_items_layout.addWidget(slot)
             
-            # Добавляем стрелку между слотами (кроме последнего)
             if i < 4:
                 arrow = QLabel("→")
                 arrow.setFixedWidth(20)
                 arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                arrow.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent; font-size: 14px;")
+                arrow.setStyleSheet(
+                    f"color: {Colors.TEXT_MUTED}; background: transparent; font-size: 14px;"
+                )
                 self.history_items_layout.addWidget(arrow)
         
         history_layout.addWidget(self.history_frame)
@@ -456,12 +721,10 @@ class WeatherSimApp(QMainWindow):
         layout.setContentsMargins(32, 24, 32, 24)
         layout.setSpacing(8)
         
-        # Эмодзи шрифт
         emoji_font = "Apple Color Emoji" if sys.platform == "darwin" else (
             "Segoe UI Emoji" if sys.platform == "win32" else "Noto Color Emoji"
         )
 
-        # Верхняя строка со статусом
         status_layout = QHBoxLayout()
         self.status_badge = QLabel("● АКТИВНО")
         self.status_badge.setStyleSheet(f"""
@@ -479,14 +742,12 @@ class WeatherSimApp(QMainWindow):
 
         layout.addStretch()
 
-        # Эмодзи погоды
         self.lbl_emoji = QLabel(WEATHER_STYLES[0]['emoji'])
         self.lbl_emoji.setFont(QFont(emoji_font, 80))
         self.lbl_emoji.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_emoji.setStyleSheet("background: transparent;")
         layout.addWidget(self.lbl_emoji)
         
-        # Название погоды
         self.lbl_weather_name = QLabel(WEATHER_STYLES[0]['name'])
         self.lbl_weather_name.setFont(QFont("SF Pro Display", 32, QFont.Weight.Bold))
         self.lbl_weather_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -499,7 +760,6 @@ class WeatherSimApp(QMainWindow):
         
         layout.addStretch()
 
-        # Прогресс-бар
         progress_container = QFrame()
         progress_container.setStyleSheet("background: transparent;")
         progress_layout = QVBoxLayout(progress_container)
@@ -533,7 +793,6 @@ class WeatherSimApp(QMainWindow):
         progress_layout.addWidget(self.progress_bar)
         layout.addWidget(progress_container)
 
-        # Статистика
         stats_frame = QFrame()
         stats_frame.setStyleSheet("""
             background: rgba(0, 0, 0, 0.2);
@@ -542,7 +801,6 @@ class WeatherSimApp(QMainWindow):
         stats_layout = QHBoxLayout(stats_frame)
         stats_layout.setContentsMargins(20, 16, 20, 16)
         
-        # Прошло дней
         days_container = QVBoxLayout()
         self.lbl_days_title = QLabel("ПРОШЛО ДНЕЙ")
         self.lbl_days_title.setStyleSheet("""
@@ -558,12 +816,10 @@ class WeatherSimApp(QMainWindow):
         days_container.addWidget(self.lbl_days_title)
         days_container.addWidget(self.lbl_days)
         
-        # Разделитель
         separator = QFrame()
         separator.setFixedWidth(1)
         separator.setStyleSheet("background: rgba(255, 255, 255, 0.2);")
         
-        # Смена через
         tau_container = QVBoxLayout()
         tau_container.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.lbl_tau_title = QLabel("СМЕНА ЧЕРЕЗ")
@@ -589,7 +845,6 @@ class WeatherSimApp(QMainWindow):
         stats_layout.addLayout(tau_container)
         
         layout.addWidget(stats_frame)
-        
         return self.weather_frame
 
     def create_chart_panel(self):
@@ -606,7 +861,6 @@ class WeatherSimApp(QMainWindow):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
 
-        # Заголовок
         header_layout = QHBoxLayout()
         icon_label = QLabel("📈")
         icon_label.setFont(QFont("Arial", 20))
@@ -616,7 +870,6 @@ class WeatherSimApp(QMainWindow):
         header_layout.addWidget(title)
         header_layout.addStretch()
         
-        # Легенда
         legend_layout = QHBoxLayout()
         legend_layout.setSpacing(16)
         
@@ -638,7 +891,6 @@ class WeatherSimApp(QMainWindow):
         header_layout.addLayout(legend_layout)
         layout.addLayout(header_layout)
 
-        # График
         self.figure = Figure(facecolor=Colors.BG_CARD, edgecolor='none')
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setStyleSheet("background: transparent; border: none;")
@@ -673,43 +925,37 @@ class WeatherSimApp(QMainWindow):
             zorder=3
         )
         
-        # Метки под столбиками
         labels = ["☀️ Солнечно", "☁️ Облачно", "☁️ Пасмурно"]
         self.ax.set_xticks(self.x_pos)
         self.ax.set_xticklabels(labels, fontsize=11, fontweight='medium')
         self.ax.set_ylim(0, 1.0)
-        
-        # Горизонтальные линии сетки
         self.ax.yaxis.grid(True, linestyle='--', alpha=0.3, color=Colors.BORDER)
         self.ax.set_axisbelow(True)
-        
         self.figure.tight_layout(pad=1.5, rect=[0, 0.12, 1, 1])
 
         return frame
 
     def setup_chart_style(self):
-        """Настройка стиля графика matplotlib"""
         self.ax.set_facecolor(Colors.BG_INPUT)
         self.ax.tick_params(colors=Colors.TEXT_SECONDARY, labelsize=10)
         self.ax.tick_params(axis='x', colors=Colors.TEXT_PRIMARY)
-        
-        # Скрываем рамку
         for spine in ['top', 'right']:
             self.ax.spines[spine].set_visible(False)
         for spine in ['bottom', 'left']:
             self.ax.spines[spine].set_color(Colors.BORDER)
             self.ax.spines[spine].set_linewidth(0.5)
-        
-        # Метки оси Y
         self.ax.set_ylabel('Вероятность', color=Colors.TEXT_SECONDARY, fontsize=11)
         self.ax.yaxis.label.set_color(Colors.TEXT_SECONDARY)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Логика симуляции (без изменений)
+    # ──────────────────────────────────────────────────────────────────────────
 
     def on_speed_changed(self):
         self.speed_multiplier = self.slider_speed.value() / 10.0
         self.lbl_speed_value.setText(f"×{self.speed_multiplier:.1f}")
 
     def on_matrix_changed(self):
-        """Парсит поля ввода и обновляет Q-матрицу в модели"""
         try:
             q01 = float(self.matrix_inputs[(0, 1)].text().replace(',', '.') or 0)
             q02 = float(self.matrix_inputs[(0, 2)].text().replace(',', '.') or 0)
@@ -717,13 +963,10 @@ class WeatherSimApp(QMainWindow):
             q12 = float(self.matrix_inputs[(1, 2)].text().replace(',', '.') or 0)
             q20 = float(self.matrix_inputs[(2, 0)].text().replace(',', '.') or 0)
             q21 = float(self.matrix_inputs[(2, 1)].text().replace(',', '.') or 0)
-            
             self.model.update_matrix(q01, q02, q10, q12, q20, q21)
-            
             for bar, h in zip(self.bars_theo, self.model.theoretical_pi):
                 bar.set_height(h)
             self.canvas.draw_idle()
-            
         except ValueError:
             pass
 
@@ -747,7 +990,6 @@ class WeatherSimApp(QMainWindow):
         self.on_matrix_changed()
         self.update_weather_display(0)
         
-        # Сброс истории - только первый элемент
         self.history_emojis = [WEATHER_STYLES[0]['emoji']]
         self.update_history_ui()
         
@@ -794,40 +1036,30 @@ class WeatherSimApp(QMainWindow):
         self.time_in_current_state += dt
         
         if self.time_in_current_state >= self.target_tau:
-            overflow = self.time_in_current_state - self.target_tau 
+            overflow = self.time_in_current_state - self.target_tau
             
-            # Добавляем новый элемент в историю
             self.history_emojis.append(WEATHER_STYLES[self.next_state]['emoji'])
-            
-            # Ограничиваем до 5 элементов (удаляем слева)
             if len(self.history_emojis) > 5:
                 self.history_emojis.pop(0)
-            
             self.update_history_ui()
 
             self.model.set_state(self.next_state)
             self.update_weather_display(self.next_state)
             
             self.target_tau, self.next_state = self.model.generate_next_transition()
-            self.time_in_current_state = overflow 
+            self.time_in_current_state = overflow
 
         self.update_labels()
         self.update_chart()
 
     def update_history_ui(self):
-        """Обновляет фиксированные слоты истории"""
-        # Очищаем все слоты
         for slot in self.history_slots:
             slot.setText("")
             slot.setStyleSheet("background: transparent;")
         
-        # Заполняем слоты справа налево (новые справа)
-        # Или можно слева направо - как удобнее
         for i, emoji in enumerate(self.history_emojis):
             if i < len(self.history_slots):
                 self.history_slots[i].setText(emoji)
-                
-                # Подсвечиваем последний (самый новый) элемент
                 if i == len(self.history_emojis) - 1:
                     self.history_slots[i].setStyleSheet(f"""
                         background: rgba(99, 102, 241, 0.2);
@@ -870,6 +1102,23 @@ class WeatherSimApp(QMainWindow):
             bar.set_height(h)
         self.canvas.draw_idle()
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # 📊 Статистика  ← единственное новое место
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def show_statistics(self):
+        """Собирает статистику из модели и открывает диалог."""
+        # Если симуляция ещё не запускалась — предупреждаем, но всё равно показываем
+        stats = {
+            "total_time":      self.model.total_time,
+            "theoretical_pi":  self.model.theoretical_pi,
+            "empirical_pi":    self.model.get_empirical_distribution(),
+            "durations":       self.model.durations.copy(),
+            "Q":               self.model.Q,
+        }
+        dlg = StatisticsDialog(stats, parent=self)
+        dlg.exec()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 🚀 ЗАПУСК
@@ -877,12 +1126,9 @@ class WeatherSimApp(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    
-    # Применяем шрифт для всего приложения
     font = QFont("SF Pro Display", 10)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)
-    
     window = WeatherSimApp()
     window.show()
     sys.exit(app.exec())
