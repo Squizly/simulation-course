@@ -39,22 +39,19 @@ class Server:
 
 class MultiServerSimulator:
     def __init__(self, lmbda: float, mu: float, c: int, k: int, theta: float, total_requests: int):
-        self.lmbda = lmbda          # Интенсивность поступления
+        self.lmbda = lmbda          # Интенсивность входящего потока
         self.mu = mu                # Интенсивность обслуживания
-        self.c = c                  # Количество каналов (серверов)
-        self.k = k                  # Максимальная длина очереди
-        self.theta = theta          # Интенсивность ухода из очереди (нетерпение)
+        self.c = c                  # Количество каналов обслуживания
+        self.k = k                  # Предельный размер очереди
+        self.theta = theta          # Интенсивность ухода
         self.total_requests = total_requests
 
-        # Состояние системы
         self.current_time = 0.0
         self.servers = [Server(i) for i in range(c)]
         self.queue = deque()
         
-        # Планировщик событий
         self.next_arrival = exp_time(self.lmbda)
         
-        # Статистика общая
         self.arrived_count = 0
         self.processed_count = 0
         self.rejected_count = 0     
@@ -64,9 +61,8 @@ class MultiServerSimulator:
         self.area_queue = 0.0
         self.last_event_time = 0.0
         
-        # Данные для построения распределений
-        self.wait_times_data = []      # Для гистограммы (время в очереди)
-        self.system_states_data = []   # Для полигона (число клиентов в системе)
+        self.wait_times_data = []
+        self.state_durations = {}
         
         self.is_finished = False
 
@@ -86,13 +82,15 @@ class MultiServerSimulator:
         t_abandon = min((req.abandon_time for req in self.queue), default=float('inf'))
 
         next_time = min(t_arrival, t_completion, t_abandon)
-
-        self.area_queue += len(self.queue) * (next_time - self.last_event_time)
-        self.last_event_time = next_time
-        self.current_time = next_time
+        dt = next_time - self.last_event_time
 
         current_in_system = len(self.queue) + sum(1 for s in self.servers if s.is_busy)
-        self.system_states_data.append(current_in_system)
+        if dt > 0:
+            self.state_durations[current_in_system] = self.state_durations.get(current_in_system, 0.0) + dt
+            self.area_queue += len(self.queue) * dt
+
+        self.last_event_time = next_time
+        self.current_time = next_time
 
         if next_time == t_arrival:
             self._handle_arrival()
@@ -111,6 +109,7 @@ class MultiServerSimulator:
         if free_server:
             req = Request(self.arrived_count, self.current_time, float('inf'))
             free_server.start_service(req, self.current_time, self.mu)
+            self.wait_times_data.append(0.0)
         else:
             if len(self.queue) < self.k:
                 patience = exp_time(self.theta) 
@@ -121,27 +120,28 @@ class MultiServerSimulator:
 
     def _handle_completion(self):
         for s in self.servers:
-            if s.next_completion == self.current_time:
+            if abs(s.next_completion - self.current_time) < 1e-9:
                 req = s.finish_service()
                 self.processed_count += 1
                 
-                wait_time = req.start_service_time - req.arrival_time
-                self.sum_wait_time += wait_time
-                self.wait_times_data.append(wait_time)
-
                 if self.queue:
                     next_req = self.queue.popleft()
+                    wait_time = self.current_time - next_req.arrival_time
+                    self.sum_wait_time += wait_time
+                    self.wait_times_data.append(wait_time)
+                    
                     s.start_service(next_req, self.current_time, self.mu)
 
     def _handle_abandon(self):
         for req in list(self.queue):
-            if req.abandon_time <= self.current_time + 1e-9:
+            if abs(req.abandon_time - self.current_time) < 1e-9:
                 self.queue.remove(req)
                 self.abandoned_count += 1
                 
+                # Заяка не дождалась обслуживания
                 wait_time = self.current_time - req.arrival_time
                 self.sum_wait_time += wait_time
-                self.wait_times_data.append(wait_time) # Сохраняем для гистограммы
+                self.wait_times_data.append(wait_time)
                 break
 
     def get_stats(self):

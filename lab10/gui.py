@@ -1,13 +1,15 @@
 import sys
 import math
-from collections import Counter
+import random
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFormLayout, 
-    QGroupBox, QSplitter, QGridLayout, QFrame, QGraphicsDropShadowEffect
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QDoubleSpinBox, QSpinBox, QPushButton, QFormLayout,
+    QGroupBox, QSplitter, QGridLayout, QFrame, QGraphicsDropShadowEffect,
+    QSizePolicy
 )
 from PyQt6.QtGui import (
-    QPainter, QColor, QFont, QPen, QPainterPath, QPolygonF
+    QPainter, QColor, QFont, QPen, QPainterPath,
+    QLinearGradient, QRadialGradient
 )
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 
@@ -16,389 +18,783 @@ from matplotlib.figure import Figure
 
 from core import MultiServerSimulator
 
-MAC_FONT = "Helvetica Neue"
+# ── Палитра ───────────────────────────────────────────────────────────────────
+BG_DEEP   = "#070711"
+BG_PANEL  = "#0d0d1a"
+BG_CARD   = "#111122"
+BG_INPUT  = "#15152a"
+BORDER    = "#252545"
 
-def add_shadow(widget, blur_radius=15, alpha=40, offset=(0, 4)):
-    shadow = QGraphicsDropShadowEffect()
-    shadow.setBlurRadius(blur_radius)
-    shadow.setColor(QColor(0, 0, 0, alpha))
-    shadow.setOffset(offset[0], offset[1])
-    widget.setGraphicsEffect(shadow)
+NEON_BLUE  = "#4fc3f7"
+NEON_PURP  = "#b39ddb"
+NEON_GREEN = "#69f0ae"
+NEON_PINK  = "#f48fb1"
+NEON_AMBER = "#ffcc02"
+NEON_CYAN  = "#18ffff"
+NEON_RED   = "#ff5252"
 
-# --- Кастомный виджет-карточка статистики ---
-class StatCard(QFrame):
-    def __init__(self, title, color_hex):
+TEXT_PRI  = "#e8eaf6"
+TEXT_SEC  = "#7986cb"
+TEXT_DIM  = "#3d4068"
+
+FONT = "Segoe UI" if sys.platform == "win32" else "SF Pro Display"
+
+
+# ── Тень ──────────────────────────────────────────────────────────────────────
+def shadow(w, r=18, a=80, dx=0, dy=4):
+    ef = QGraphicsDropShadowEffect()
+    ef.setBlurRadius(r)
+    ef.setColor(QColor(0, 0, 0, a))
+    ef.setOffset(dx, dy)
+    w.setGraphicsEffect(ef)
+
+
+# ── Визуализатор СМО (без частиц, статичная перерисовка) ─────────────────────
+class FlowVisualizer(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(220)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self.queue_count   = 0
+        self.max_k         = 10
+        self.servers_state = []
+
+        # Анимация только пульса серверов — лёгкий синус
+        self._phase = 0.0
+        self._anim  = QTimer(self)
+        self._anim.timeout.connect(self._tick)
+        self._anim.start(50)   # 20 fps — достаточно для плавного пульса
+
+    def update_state(self, queue_count, max_k, servers_state):
+        self.queue_count   = queue_count
+        self.max_k         = max_k
+        self.servers_state = servers_state
+
+    def _tick(self):
+        self._phase += 0.12
+        self.update()
+
+    # ── Рисование ─────────────────────────────────────────────────────────────
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+
+        # Фон
+        p.fillRect(0, 0, W, H, QColor(BG_DEEP))
+
+        # Тонкая сетка точек на фоне (статичная, не анимированная)
+        self._draw_dot_grid(p, W, H)
+
+        cy = H / 2
+
+        # Труба потока
+        self._draw_tube(p, W, H, cy)
+
+        # Зона очереди
+        self._draw_queue(p, W, H, cy)
+
+        # Балансировщик
+        bx = self._draw_balancer(p, W, H, cy)
+
+        # Серверы
+        self._draw_servers(p, W, H, bx)
+
+    def _draw_dot_grid(self, p, W, H):
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        step = 28
+        for gx in range(0, W, step):
+            for gy in range(0, H, step):
+                p.setBrush(QColor(40, 40, 90, 45))
+                p.drawEllipse(QPointF(gx, gy), 1.2, 1.2)
+        p.restore()
+
+    def _draw_tube(self, p, W, H, cy):
+        x1   = 40
+        x2   = int(W * 0.74)
+        rect = QRectF(x1, cy - 24, x2 - x1, 48)
+
+        grad = QLinearGradient(x1, cy - 24, x1, cy + 24)
+        grad.setColorAt(0,   QColor(25, 35, 80, 55))
+        grad.setColorAt(0.5, QColor(15, 25, 60, 90))
+        grad.setColorAt(1,   QColor(25, 35, 80, 55))
+
+        path = QPainterPath()
+        path.addRoundedRect(rect, 12, 12)
+        p.setBrush(grad)
+
+        fill = self.queue_count / max(1, self.max_k)
+        border_col = QColor(NEON_PINK if fill >= 1.0 else NEON_BLUE)
+        border_col.setAlpha(100)
+        p.setPen(QPen(border_col, 1.5))
+        p.drawPath(path)
+
+    def _draw_queue(self, p, W, H, cy):
+        cell  = 20
+        gap   = 6
+        slots = min(self.max_k, int((W * 0.55) / (cell + gap)))
+        ox    = 55
+
+        # Заголовок очереди
+        fill = self.queue_count / max(1, self.max_k)
+        bar_color = NEON_PINK if fill >= 1.0 else (NEON_AMBER if fill > 0.7 else NEON_BLUE)
+
+        p.setFont(QFont(FONT, 8, QFont.Weight.Bold))
+        p.setPen(QColor(bar_color))
+        p.drawText(ox, int(cy - 30),
+                   f"ОЧЕРЕДЬ  {self.queue_count} / {self.max_k}")
+
+        # Полоса заполненности
+        bw, bh = 100, 4
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(30, 30, 60))
+        p.drawRoundedRect(ox, int(cy - 24), bw, bh, 2, 2)
+        fw = int(bw * min(fill, 1.0))
+        if fw > 0:
+            bg = QLinearGradient(ox, 0, ox + bw, 0)
+            bg.setColorAt(0, QColor(NEON_BLUE))
+            bg.setColorAt(1, QColor(bar_color))
+            p.setBrush(bg)
+            p.drawRoundedRect(ox, int(cy - 24), fw, bh, 2, 2)
+
+        # Слоты
+        for i in range(slots):
+            cx = ox + i * (cell + gap)
+            filled = i < self.queue_count
+
+            if filled:
+                fg = QRadialGradient(cx + cell/2, cy, cell)
+                fg.setColorAt(0, QColor(NEON_PURP).lighter(130))
+                fg.setColorAt(1, QColor(NEON_PURP).darker(140))
+                p.setBrush(fg)
+                p.setPen(QPen(QColor(NEON_PURP), 1.5))
+            else:
+                p.setBrush(QColor(18, 18, 45, 90))
+                p.setPen(QPen(QColor(55, 55, 110, 100), 1,
+                              Qt.PenStyle.DashLine))
+
+            p.drawEllipse(QRectF(cx, cy - cell / 2, cell, cell))
+
+    def _draw_balancer(self, p, W, H, cy):
+        """Рисует шестиугольный балансировщик, возвращает правый X"""
+        cx = W * 0.78
+        r  = 32
+
+        # Контур шестиугольника
+        hex_path = QPainterPath()
+        for i in range(6):
+            ang = math.radians(60 * i - 30)
+            px  = cx + r * math.cos(ang)
+            py  = cy + r * math.sin(ang)
+            if i == 0:
+                hex_path.moveTo(px, py)
+            else:
+                hex_path.lineTo(px, py)
+        hex_path.closeSubpath()
+
+        bg = QLinearGradient(cx - r, cy - r, cx + r, cy + r)
+        bg.setColorAt(0, QColor("#1a2055"))
+        bg.setColorAt(1, QColor("#0d1535"))
+        p.setBrush(bg)
+        p.setPen(QPen(QColor(NEON_CYAN), 1.8))
+        p.drawPath(hex_path)
+
+        p.setPen(QColor(NEON_CYAN))
+        p.setFont(QFont(FONT, 7, QFont.Weight.Bold))
+        p.drawText(QRectF(cx - r, cy - r, r * 2, r * 2),
+                   Qt.AlignmentFlag.AlignCenter, "БАЛАНСИР\nЗАГРУЗКИ")
+
+        return cx + r
+
+    def _draw_servers(self, p, W, H, bal_right_x):
+        n = len(self.servers_state)
+        if n == 0:
+            return
+
+        sx    = W * 0.91
+        marg  = 20
+        step  = (H - marg * 2) / max(n, 1)
+        r     = min(26, step * 0.36)
+
+        for i, busy in enumerate(self.servers_state):
+            sy    = marg + step * i + step / 2
+            color = QColor(NEON_GREEN if not busy else NEON_PINK)
+
+            # Соединительная линия
+            conn = QLinearGradient(bal_right_x, H / 2, sx - r, sy)
+            c1   = QColor(NEON_CYAN);  c1.setAlpha(60)
+            c2   = QColor(color);      c2.setAlpha(50)
+            conn.setColorAt(0, c1)
+            conn.setColorAt(1, c2)
+            p.setPen(QPen(conn, 1.2))
+            p.drawLine(QPointF(bal_right_x, H / 2), QPointF(sx - r, sy))
+
+            # Пульсирующий ореол только у занятых серверов
+            if busy:
+                pulse_r = r * 1.55 + 5 * math.sin(self._phase + i * 1.2)
+                gc      = QColor(NEON_PINK)
+                gc.setAlpha(int(28 + 22 * abs(math.sin(self._phase + i))))
+                p.setBrush(gc)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawEllipse(QPointF(sx, sy), pulse_r, pulse_r)
+
+            # Тело сервера
+            sv = QRadialGradient(sx - r * 0.3, sy - r * 0.3, r * 1.4)
+            sv.setColorAt(0, QColor(color).lighter(115))
+            sv.setColorAt(1, QColor(color).darker(185))
+            p.setBrush(sv)
+            p.setPen(QPen(color, 2.2))
+            p.drawEllipse(QPointF(sx, sy), r, r)
+
+            # Внутреннее кольцо
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255, 45), 1))
+            p.drawEllipse(QPointF(sx, sy), r * 0.52, r * 0.52)
+
+            # Номер сервера
+            p.setPen(QColor(255, 255, 255, 210))
+            p.setFont(QFont(FONT, int(max(7, r * 0.42)), QFont.Weight.Bold))
+            p.drawText(QRectF(sx - r, sy - r, r * 2, r * 2),
+                       Qt.AlignmentFlag.AlignCenter, f"S{i+1}")
+
+            # Маленький цветной бейдж статуса
+            bx, by = sx + r - 6, sy - r + 6
+            badge  = QColor(NEON_GREEN if not busy else NEON_RED)
+            p.setBrush(badge)
+            p.setPen(QPen(QColor(BG_DEEP), 1.2))
+            p.drawEllipse(QPointF(bx, by), 6, 6)
+
+            # Подпись статуса
+            label = "ЗАНЯТ" if busy else "ПРОСТОЙ"
+            p.setPen(color)
+            p.setFont(QFont(FONT, 7, QFont.Weight.Bold))
+            p.drawText(int(sx + r + 7), int(sy + 4), label)
+
+
+# ── Карточка метрики ──────────────────────────────────────────────────────────
+class MetricCard(QFrame):
+    def __init__(self, title, accent, icon=""):
         super().__init__()
         self.setStyleSheet(f"""
             QFrame {{
-                background-color: #181825;
-                border: 1px solid #313244;
-                border-radius: 8px;
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #13132b, stop:1 #0e0e20);
+                border: 1px solid #252545;
+                border-top: 2px solid {accent};
+                border-radius: 10px;
             }}
         """)
-        add_shadow(self, blur_radius=10, alpha=30)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 10, 5, 10)
-        
-        self.lbl_title = QLabel(title)
-        self.lbl_title.setStyleSheet("color: #A6ADC8; font-size: 10px; font-weight: bold; border: none;")
-        self.lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        self.lbl_value = QLabel("0")
-        self.lbl_value.setStyleSheet(f"color: {color_hex}; font-size: 18px; font-weight: bold; border: none;")
-        self.lbl_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        layout.addWidget(self.lbl_title)
-        layout.addWidget(self.lbl_value)
+        shadow(self, r=10, a=70)
 
-    def set_value(self, val):
-        self.lbl_value.setText(str(val))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 9, 10, 10)
+        lay.setSpacing(2)
 
-# --- Визуализатор Мультисерверного Кластера ---
-class VisualizerWidget(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setMinimumHeight(240)
-        self.queue_count = 0
-        self.max_k = 0
-        self.servers_state = []
-        
-        self.anim_phase = 0.0
-        self.anim_timer = QTimer(self)
-        self.anim_timer.timeout.connect(self.update_animation)
-        self.anim_timer.start(16)
+        top = QHBoxLayout()
+        if icon:
+            ico = QLabel(icon)
+            ico.setStyleSheet(
+                f"color:{accent};font-size:13px;"
+                "border:none;background:transparent;")
+            top.addWidget(ico)
 
-    def update_animation(self):
-        self.anim_phase += 0.15
-        self.update() 
+        lbl_t = QLabel(title)
+        lbl_t.setStyleSheet(
+            f"color:{TEXT_SEC};font-size:9px;font-weight:700;"
+            "letter-spacing:1px;border:none;background:transparent;")
+        top.addWidget(lbl_t)
+        top.addStretch()
 
-    def update_state(self, queue_count, max_k, servers_state):
-        self.queue_count = queue_count
-        self.max_k = max_k
-        self.servers_state = servers_state
+        self.lbl_v = QLabel("—")
+        self.lbl_v.setStyleSheet(
+            f"color:{accent};font-size:21px;font-weight:800;"
+            "border:none;background:transparent;")
+        self.lbl_v.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        width, height = self.width(), self.height()
-        center_y = height / 2
+        lay.addLayout(top)
+        lay.addWidget(self.lbl_v)
 
-        # Фон
-        painter.fillRect(0, 0, width, height, QColor("#11111B"))
-
-        # Отрисовка Трубы Очереди
-        pipe_width = width - 300
-        pipeline_rect = QRectF(20, center_y - 25, pipe_width, 50)
-        pipe_path = QPainterPath()
-        pipe_path.addRoundedRect(pipeline_rect, 10, 10)
-        painter.setBrush(QColor(255, 255, 255, 5))
-        
-        pipe_border_color = QColor("#F38BA8") if self.queue_count >= self.max_k else QColor("#89B4FA")
-        painter.setPen(QPen(pipe_border_color, 2, Qt.PenStyle.DashLine))
-        painter.drawPath(pipe_path)
-
-        painter.setPen(QColor("#A6ADC8"))
-        painter.setFont(QFont(MAC_FONT, 10, QFont.Weight.Bold))
-        painter.drawText(25, int(center_y - 35), f"БУФЕР ОЧЕРЕДИ [ {self.queue_count} / {self.max_k} ]")
-
-        # Пакеты в очереди
-        hex_size = 14
-        max_vis = min(self.queue_count, int((pipe_width - 20) / (hex_size * 2 + 5)))
-        start_x = pipeline_rect.right() - 25
-
-        for i in range(max_vis):
-            x = start_x - (i * (hex_size * 2 + 8))
-            y = center_y
-            points = QPolygonF()
-            for j in range(6):
-                angle_rad = math.pi / 180 * (60 * j - 30)
-                points.append(QPointF(x + hex_size * math.cos(angle_rad), y + hex_size * math.sin(angle_rad)))
-            painter.setBrush(QColor("#CBA6F7"))
-            painter.setPen(QPen(QColor("#11111B"), 1))
-            painter.drawPolygon(points)
-
-        # Балансировщик нагрузки
-        bal_rect = QRectF(pipeline_rect.right() + 10, center_y - 40, 30, 80)
-        painter.setBrush(QColor("#313244"))
-        painter.setPen(QPen(QColor("#CDD6F4"), 2))
-        painter.drawRoundedRect(bal_rect, 5, 5)
-        painter.setFont(QFont(MAC_FONT, 8, QFont.Weight.Bold))
-        painter.drawText(bal_rect, Qt.AlignmentFlag.AlignCenter, "LB")
-
-        # Отрисовка Серверов
-        num_servers = len(self.servers_state)
-        if num_servers == 0: return
-
-        server_radius = min(25, (height - 40) / (num_servers * 2))
-        spacing = (height - 40 - (server_radius * 2 * num_servers)) / max(1, num_servers)
-        start_y = 20 + server_radius
-        server_x = bal_rect.right() + 80
-
-        for i, is_busy in enumerate(self.servers_state):
-            y = start_y + i * (server_radius * 2 + spacing)
-            
-            painter.setPen(QPen(QColor("#45475A"), 2, Qt.PenStyle.DotLine))
-            painter.drawLine(int(bal_rect.right()), int(center_y), int(server_x - server_radius), int(y))
-
-            s_color = QColor("#F38BA8") if is_busy else QColor("#A6E3A1")
-            
-            if is_busy:
-                pulse = int(30 + 40 * math.sin(self.anim_phase))
-                painter.setBrush(QColor(s_color.red(), s_color.green(), s_color.blue(), pulse))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(QPointF(server_x, y), server_radius*1.5, server_radius*1.5)
-
-            painter.setBrush(QColor("#181825"))
-            painter.setPen(QPen(s_color, 3))
-            painter.drawEllipse(QPointF(server_x, y), server_radius, server_radius)
-            
-            painter.setPen(QColor("#CDD6F4"))
-            painter.setFont(QFont(MAC_FONT, max(8, int(server_radius*0.4)), QFont.Weight.Bold))
-            painter.drawText(QRectF(server_x - server_radius, y - server_radius, server_radius*2, server_radius*2), 
-                             Qt.AlignmentFlag.AlignCenter, f"S{i+1}")
+    def set_value(self, v):
+        self.lbl_v.setText(str(v))
 
 
-# --- Главное окно ---
+# ── Кнопка ────────────────────────────────────────────────────────────────────
+class NeonButton(QPushButton):
+    def __init__(self, text, color):
+        super().__init__(text)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumHeight(38)
+        self.setFont(QFont(FONT, 10, QFont.Weight.Bold))
+        c_light = QColor(color).lighter(118).name()
+        c_dark  = QColor(color).darker(165).name()
+        c_press = QColor(color).darker(135).name()
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 {c_light}, stop:1 {c_dark});
+                color: #06060f;
+                border: 1.5px solid {color};
+                border-radius: 9px;
+                padding: 8px 6px;
+                font-weight: 800;
+                letter-spacing: 0.4px;
+            }}
+            QPushButton:hover  {{ background: {color}; border-color: #ffffff; }}
+            QPushButton:pressed {{ background: {c_press}; }}
+        """)
+        shadow(self, r=8, a=35)
+
+
+# ── Группа параметров ─────────────────────────────────────────────────────────
+class ParamGroup(QGroupBox):
+    def __init__(self, title):
+        super().__init__(title)
+        self.setStyleSheet(f"""
+            QGroupBox {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #0e0e20, stop:1 #0b0b18);
+                border: 1px solid {BORDER};
+                border-radius: 12px;
+                margin-top: 18px;
+                padding-top: 14px;
+                font-weight: 700;
+                font-size: 11px;
+                color: {TEXT_SEC};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 3px 10px;
+                background: #131330;
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+                color: {NEON_BLUE};
+                left: 12px;
+            }}
+        """)
+        shadow(self, r=12, a=55)
+
+
+# ── Главное окно ──────────────────────────────────────────────────────────────
 class AdvancedSMOApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ProSim: M/M/c/K Cluster Analysis")
-        self.resize(1400, 850)
-        self.apply_dark_theme()
+        self.setWindowTitle("Мультисерверный Анализатор СМО")
+        self.resize(1480, 900)
+        self._apply_theme()
 
-        self.sim = None
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.sim_step)
-        self.animation_speed = 40 
+        self.sim        = None
+        self.timer      = QTimer()
+        self.timer.timeout.connect(self._sim_step)
+        self.anim_speed = 30
 
-        self.setup_ui()
+        self._build_ui()
 
-    def apply_dark_theme(self):
-        dark_qss = f"""
-        QMainWindow, QWidget {{ background-color: #1E1E2E; color: #CDD6F4; font-family: '{MAC_FONT}', sans-serif; }}
-        QGroupBox {{ border: 1px solid #45475A; border-radius: 10px; margin-top: 15px; padding-top: 20px; font-weight: bold; font-size: 14px; background-color: #181825; }}
-        QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top center; padding: 5px 10px; color: #89B4FA; }}
-        QSpinBox, QDoubleSpinBox {{ background-color: #11111B; border: 1px solid #313244; padding: 6px; border-radius: 6px; color: #CDD6F4; font-weight: bold; }}
-        QSpinBox:focus, QDoubleSpinBox:focus {{ border: 1px solid #89B4FA; }}
-        QLabel {{ font-size: 12px; }}
-        QPushButton {{ font-weight: bold; font-size: 13px; border-radius: 8px; padding: 10px; color: #11111B; border: none; }}
-        QPushButton#btn_start {{ background-color: #A6E3A1; }}
-        QPushButton#btn_pause {{ background-color: #F9E2AF; }}
-        QPushButton#btn_ff {{ background-color: #CBA6F7; }}
-        QPushButton#btn_reset {{ background-color: #F38BA8; }}
-        """
-        self.setStyleSheet(dark_qss)
+    # ── Глобальная тема ───────────────────────────────────────────────────────
+    def _apply_theme(self):
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{
+                background-color: {BG_DEEP};
+                color: {TEXT_PRI};
+                font-family: '{FONT}', 'Segoe UI', sans-serif;
+            }}
+            QSplitter::handle {{ background: {BORDER}; width: 1px; }}
+            QSpinBox, QDoubleSpinBox {{
+                background: {BG_INPUT};
+                border: 1px solid {BORDER};
+                border-radius: 7px;
+                padding: 5px 8px;
+                color: {TEXT_PRI};
+                font-weight: 600;
+                font-size: 11px;
+            }}
+            QSpinBox:focus, QDoubleSpinBox:focus {{
+                border: 1.5px solid {NEON_BLUE};
+                background: {BG_CARD};
+            }}
+            QSpinBox::up-button, QDoubleSpinBox::up-button,
+            QSpinBox::down-button, QDoubleSpinBox::down-button {{
+                background: {BORDER}; border: none;
+                border-radius: 3px; width: 14px;
+            }}
+            QLabel {{
+                font-size: 10px;
+                color: {TEXT_SEC};
+                background: transparent;
+            }}
+        """)
 
-    def setup_ui(self):
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QHBoxLayout(central_widget)
-        main_layout.setContentsMargins(15, 15, 15, 15)
+    # ── Построение UI ─────────────────────────────────────────────────────────
+    def _build_ui(self):
+        root     = QWidget()
+        self.setCentralWidget(root)
+        root_lay = QHBoxLayout(root)
+        root_lay.setContentsMargins(10, 10, 10, 10)
+        root_lay.setSpacing(10)
 
-        # === ЛЕВАЯ ПАНЕЛЬ ===
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0,0,0,0)
+        # ─── Левая колонка ────────────────────────────────────────────────────
+        left = QWidget()
+        left.setFixedWidth(305)
+        left_lay = QVBoxLayout(left)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(10)
 
-        # Настройки
-        settings_group = QGroupBox("ПАРАМЕТРЫ КЛАСТЕРА")
-        add_shadow(settings_group)
-        form_layout = QFormLayout(settings_group)
-        
-        self.in_lmbda = QDoubleSpinBox(); self.in_lmbda.setValue(10.0); self.in_lmbda.setSingleStep(1.0)
-        self.in_mu = QDoubleSpinBox(); self.in_mu.setValue(3.0); self.in_mu.setSingleStep(0.5)
-        self.in_c = QSpinBox(); self.in_c.setRange(1, 15); self.in_c.setValue(3)
-        self.in_k = QSpinBox(); self.in_k.setRange(1, 500); self.in_k.setValue(10)
-        self.in_theta = QDoubleSpinBox(); self.in_theta.setValue(0.5); self.in_theta.setSingleStep(0.1)
-        self.in_n = QSpinBox(); self.in_n.setMaximum(10000); self.in_n.setValue(500)
-        
-        form_layout.addRow("Поступление (λ):", self.in_lmbda)
-        form_layout.addRow("Обслуживание (μ):", self.in_mu)
-        form_layout.addRow("Серверов (c):", self.in_c)
-        form_layout.addRow("Лимит очереди (K):", self.in_k)
-        form_layout.addRow("Нетерпение (θ):", self.in_theta)
-        form_layout.addRow("Всего заявок (N):", self.in_n)
-        
-        # Кнопки
-        btn_layout = QGridLayout()
-        self.btn_start = QPushButton("⏵ СТАРТ"); self.btn_start.setObjectName("btn_start")
-        self.btn_pause = QPushButton("⏸ ПАУЗА"); self.btn_pause.setObjectName("btn_pause")
-        self.btn_ff = QPushButton("⏭ МГНОВЕННО"); self.btn_ff.setObjectName("btn_ff")
-        self.btn_reset = QPushButton("⟲ СБРОС"); self.btn_reset.setObjectName("btn_reset")
+        # Параметры
+        pg   = ParamGroup("ПАРАМЕТРЫ МОДЕЛИ")
+        form = QFormLayout(pg)
+        form.setContentsMargins(14, 18, 14, 14)
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        for btn in [self.btn_start, self.btn_pause, self.btn_ff, self.btn_reset]:
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            add_shadow(btn, blur_radius=10, alpha=40, offset=(0, 2))
+        def dbl(lo, hi, val, step, dec=2):
+            w = QDoubleSpinBox()
+            w.setRange(lo, hi); w.setValue(val)
+            w.setSingleStep(step); w.setDecimals(dec)
+            return w
 
-        self.btn_start.clicked.connect(self.play_sim)
-        self.btn_pause.clicked.connect(self.pause_sim)
-        self.btn_ff.clicked.connect(self.fast_forward)
-        self.btn_reset.clicked.connect(self.reset_sim)
+        def intb(lo, hi, val):
+            w = QSpinBox(); w.setRange(lo, hi); w.setValue(val); return w
 
-        btn_layout.addWidget(self.btn_start, 0, 0); btn_layout.addWidget(self.btn_pause, 0, 1)
-        btn_layout.addWidget(self.btn_ff, 1, 0); btn_layout.addWidget(self.btn_reset, 1, 1)
+        self.in_lmbda = dbl(0.1, 200, 10.0, 1.0)
+        self.in_mu    = dbl(0.1, 200,  3.0, 0.5)
+        self.in_c     = intb(1, 20,   3)
+        self.in_k     = intb(1, 500, 10)
+        self.in_theta = dbl(0.0, 20,  0.5, 0.1)
+        self.in_n     = intb(100, 50000, 2000)
 
-        # Статистика
-        stats_group = QGroupBox("МЕТРИКИ КЛАСТЕРА")
-        add_shadow(stats_group)
-        stats_layout = QGridLayout(stats_group)
-        
+        def lbl(text, color):
+            l = QLabel(text)
+            l.setStyleSheet(
+                f"color:{color};font-size:10px;"
+                "font-weight:600;background:transparent;")
+            return l
+
+        form.addRow(lbl("Интенс. потока  λ", NEON_CYAN),  self.in_lmbda)
+        form.addRow(lbl("Интенс. обслуж. μ", NEON_GREEN), self.in_mu)
+        form.addRow(lbl("Число серверов  c", NEON_BLUE),  self.in_c)
+        form.addRow(lbl("Ограничение  K",    NEON_PURP),  self.in_k)
+        form.addRow(lbl("Нетерпение  θ",     NEON_AMBER), self.in_theta)
+        form.addRow(lbl("Объём выборки  N",  TEXT_PRI),   self.in_n)
+
+        # Кнопки управления
+        cg      = ParamGroup("УПРАВЛЕНИЕ")
+        cg_grid = QGridLayout(cg)
+        cg_grid.setContentsMargins(10, 18, 10, 10)
+        cg_grid.setSpacing(8)
+
+        self.btn_start = NeonButton("▶  СТАРТ",     NEON_GREEN)
+        self.btn_pause = NeonButton("⏸  ПАУЗА",     NEON_AMBER)
+        self.btn_ff    = NeonButton("⚡  МГНОВЕННО", NEON_PURP)
+        self.btn_reset = NeonButton("↺  СБРОС",      NEON_PINK)
+
+        self.btn_start.clicked.connect(self._play)
+        self.btn_pause.clicked.connect(self._pause)
+        self.btn_ff.clicked.connect(self._fast_forward)
+        self.btn_reset.clicked.connect(self._reset)
+
+        cg_grid.addWidget(self.btn_start, 0, 0)
+        cg_grid.addWidget(self.btn_pause, 0, 1)
+        cg_grid.addWidget(self.btn_ff,    1, 0)
+        cg_grid.addWidget(self.btn_reset, 1, 1)
+
+        # Карточки метрик
+        mg      = ParamGroup("МЕТРИКИ В РЕАЛЬНОМ ВРЕМЕНИ")
+        mg_grid = QGridLayout(mg)
+        mg_grid.setContentsMargins(8, 18, 8, 10)
+        mg_grid.setSpacing(6)
+
         self.cards = {
-            "arr": StatCard("ПОСТУПИЛО", "#CDD6F4"),
-            "proc": StatCard("УСПЕШНО", "#A6E3A1"),
-            "rej": StatCard("ОТКАЗ (FULL)", "#F38BA8"),
-            "abn": StatCard("УШЛИ (TIMEOUT)", "#FAB387"),
-            "p_rej": StatCard("% ОТКАЗОВ", "#F38BA8"),
-            "p_abn": StatCard("% УХОДОВ", "#FAB387"),
-            "time": StatCard("ВРЕМЯ (с)", "#89B4FA"),
-            "avg_q": StatCard("СР. ОЧЕРЕДЬ", "#CBA6F7"),
+            "arr":   MetricCard("ПОСТУПИЛО",       NEON_BLUE,  "→"),
+            "proc":  MetricCard("ОБСЛУЖЕНО",        NEON_GREEN, "✓"),
+            "rej":   MetricCard("ОТКАЗЫ",           NEON_PINK,  "✗"),
+            "abn":   MetricCard("УХОДЫ",            NEON_AMBER, "⚠"),
+            "p_rej": MetricCard("ВЕРОЯТН. ОТКАЗА",  NEON_PINK,  "%"),
+            "p_abn": MetricCard("ВЕРОЯТН. УХОДА",   NEON_AMBER, "%"),
+            "avg_q": MetricCard("СР. ОЧЕРЕДЬ",      NEON_PURP,  "Q"),
+            "time":  MetricCard("ВР. СИСТЕМЫ (с)",  NEON_CYAN,  "⏱"),
         }
-        
-        row, col = 0, 0
-        for key, card in self.cards.items():
-            stats_layout.addWidget(card, row, col)
-            col += 1
-            if col > 1:
-                col = 0
-                row += 1
 
-        left_layout.addWidget(settings_group)
-        left_layout.addSpacing(10)
-        left_layout.addLayout(btn_layout)
-        left_layout.addSpacing(10)
-        left_layout.addWidget(stats_group)
-        left_layout.addStretch()
+        pos = [(0,0),(0,1),(1,0),(1,1),(2,0),(2,1),(3,0),(3,1)]
+        for (r_, c_), card in zip(pos, self.cards.values()):
+            mg_grid.addWidget(card, r_, c_)
 
-        # === ПРАВАЯ ПАНЕЛЬ ===
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0,0,0,0)
-        right_layout.setSpacing(15)
-        
-        self.visualizer = VisualizerWidget()
-        add_shadow(self.visualizer)
-        
-        # Область графиков (Гистограмма и Полигон)
-        self.fig = Figure(facecolor='#1E1E2E')
-        self.fig.subplots_adjust(left=0.06, right=0.97, bottom=0.15, top=0.85, wspace=0.2)
+        left_lay.addWidget(pg)
+        left_lay.addWidget(cg)
+        left_lay.addWidget(mg)
+        left_lay.addStretch()
+
+        # ─── Правая колонка ───────────────────────────────────────────────────
+        right     = QWidget()
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(10)
+
+        # Визуализатор
+        self.visualizer = FlowVisualizer()
+        vis_frame = QFrame()
+        vis_frame.setStyleSheet(f"""
+            QFrame {{
+                background: {BG_DEEP};
+                border: 1px solid {BORDER};
+                border-radius: 14px;
+            }}
+        """)
+        shadow(vis_frame, r=18, a=85)
+        vfl = QVBoxLayout(vis_frame)
+        vfl.setContentsMargins(0, 0, 0, 0)
+        vfl.addWidget(self.visualizer)
+
+        # Графики
+        charts_frame = QFrame()
+        charts_frame.setStyleSheet(f"""
+            QFrame {{
+                background: {BG_PANEL};
+                border: 1px solid {BORDER};
+                border-radius: 14px;
+            }}
+        """)
+        shadow(charts_frame, r=16, a=75)
+
+        self.fig = Figure(facecolor=BG_PANEL)
+        self.fig.subplots_adjust(
+            left=0.07, right=0.97,
+            bottom=0.14, top=0.88,
+            wspace=0.28)
         self.canvas = FigureCanvas(self.fig)
-        
+        self.canvas.setStyleSheet("background:transparent;")
+
         self.ax_hist = self.fig.add_subplot(121)
         self.ax_poly = self.fig.add_subplot(122)
-        
-        chart_container = QFrame()
-        chart_container.setStyleSheet("background-color: #181825; border-radius: 10px;")
-        add_shadow(chart_container)
-        QVBoxLayout(chart_container).addWidget(self.canvas)
+        self._style_axes()
 
-        self.format_axes()
-        
-        right_layout.addWidget(self.visualizer, stretch=1)
-        right_layout.addWidget(chart_container, stretch=2)
+        cfl = QVBoxLayout(charts_frame)
+        cfl.setContentsMargins(6, 6, 6, 6)
+        cfl.addWidget(self.canvas)
 
+        right_lay.addWidget(vis_frame,    stretch=2)
+        right_lay.addWidget(charts_frame, stretch=3)
+
+        # Сплиттер
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
-        splitter.setSizes([320, 1080])
-        splitter.setHandleWidth(0)
-        
-        main_layout.addWidget(splitter)
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setSizes([305, 1175])
+        splitter.setHandleWidth(1)
 
-    def format_axes(self):
+        root_lay.addWidget(splitter)
+
+    # ── Оформление осей ───────────────────────────────────────────────────────
+    def _style_axes(self):
+        TICK_C  = "#4a4a7a"
+        SPINE_C = "#252550"
+        GRID_C  = "#1a1a32"
+
         for ax in [self.ax_hist, self.ax_poly]:
-            ax.set_facecolor('#181825')
-            ax.tick_params(colors='#A6ADC8', labelsize=10)
-            for spine in ['top', 'right']: ax.spines[spine].set_visible(False)
-            for spine in ['left', 'bottom']: ax.spines[spine].set_color('#313244')
-            ax.grid(True, axis='y', linestyle='--', alpha=0.3, color='#CDD6F4')
+            ax.set_facecolor("#0b0b1a")
+            ax.tick_params(colors=TICK_C, labelsize=8)
+            for sp in ["top", "right"]:
+                ax.spines[sp].set_visible(False)
+            for sp in ["left", "bottom"]:
+                ax.spines[sp].set_color(SPINE_C)
+                ax.spines[sp].set_linewidth(1)
+            ax.grid(True, linestyle=":", alpha=0.3,
+                    color=GRID_C, linewidth=0.8)
 
-        self.ax_hist.set_title("ГИСТОГРАММА: ВРЕМЯ В ОЧЕРЕДИ", color='#CDD6F4', fontsize=11, fontweight='bold', family=MAC_FONT)
-        self.ax_hist.set_xlabel("Время ожидания (с)", color='#A6ADC8')
-        self.ax_hist.set_ylabel("Частота", color='#A6ADC8')
+        self.ax_hist.set_title(
+            "РАСПРЕДЕЛЕНИЕ ВРЕМЕНИ ОЖИДАНИЯ",
+            color=TEXT_PRI, fontsize=9, fontweight="bold", pad=10)
+        self.ax_hist.set_xlabel(
+            "Время ожидания $t_w$ (сек)",
+            color=TICK_C, fontsize=8)
+        self.ax_hist.set_ylabel(
+            "Плотность вероятности $f(t_w)$",
+            color=TICK_C, fontsize=8)
 
-        self.ax_poly.set_title("ПОЛИГОН: КЛИЕНТОВ В СИСТЕМЕ", color='#CDD6F4', fontsize=11, fontweight='bold', family=MAC_FONT)
-        self.ax_poly.set_xlabel("Число клиентов (к)", color='#A6ADC8')
-        self.ax_poly.set_ylabel("Частота", color='#A6ADC8')
+        self.ax_poly.set_title(
+            "ВЕРОЯТНОСТИ СОСТОЯНИЙ СИСТЕМЫ",
+            color=TEXT_PRI, fontsize=9, fontweight="bold", pad=10)
+        self.ax_poly.set_xlabel(
+            "Число заявок в СМО $k$",
+            color=TICK_C, fontsize=8)
+        self.ax_poly.set_ylabel(
+            "Вероятность $p_k$",
+            color=TICK_C, fontsize=8)
 
-    def reset_sim(self):
+    # ── Управление симуляцией ─────────────────────────────────────────────────
+    def _reset(self):
         self.timer.stop()
         self.sim = MultiServerSimulator(
-            self.in_lmbda.value(), self.in_mu.value(), self.in_c.value(),
-            self.in_k.value(), self.in_theta.value(), self.in_n.value()
+            self.in_lmbda.value(), self.in_mu.value(),
+            self.in_c.value(),     self.in_k.value(),
+            self.in_theta.value(), self.in_n.value()
         )
         self.ax_hist.clear()
         self.ax_poly.clear()
-        self.format_axes()
+        self._style_axes()
         self.canvas.draw()
-        self.visualizer.update_state(0, self.in_k.value(), [False]*self.in_c.value())
-        self.update_stats_ui()
+        self.visualizer.update_state(
+            0, self.in_k.value(), [False] * self.in_c.value())
+        self._update_cards()
 
-    def play_sim(self):
-        if self.sim is None or self.sim.is_finished: self.reset_sim()
-        self.timer.start(self.animation_speed)
+    def _play(self):
+        if self.sim is None or self.sim.is_finished:
+            self._reset()
+        self.timer.start(self.anim_speed)
 
-    def pause_sim(self): self.timer.stop()
-
-    def fast_forward(self):
-        if self.sim is None: self.reset_sim()
+    def _pause(self):
         self.timer.stop()
-        while not self.sim.is_finished: self.sim.step()
-        self.update_ui_full()
 
-    def sim_step(self):
-        for _ in range(5): 
+    def _fast_forward(self):
+        if self.sim is None:
+            self._reset()
+        self.timer.stop()
+        while not self.sim.is_finished:
+            self.sim.step()
+        self._refresh_ui()
+
+    def _sim_step(self):
+        if self.sim is None:
+            return
+        for _ in range(8):
             if not self.sim.step():
                 self.timer.stop()
-                self.update_ui_full()
+                self._refresh_ui()
                 return
-        self.update_ui_full()
+        self._refresh_ui()
 
-    def update_ui_full(self):
-        # 1. Визуал серверов и очереди
-        srv_state = [s.is_busy for s in self.sim.servers]
-        self.visualizer.update_state(len(self.sim.queue), self.sim.k, srv_state)
-        
-        # 2. Обновление графиков (Эмпирические распределения)
+    # ── Обновление UI ─────────────────────────────────────────────────────────
+    def _refresh_ui(self):
+        if self.sim is None:
+            return
+
+        srv = [s.is_busy for s in self.sim.servers]
+        self.visualizer.update_state(
+            len(self.sim.queue), self.sim.k, srv)
+
         self.ax_hist.clear()
         self.ax_poly.clear()
-        self.format_axes()
+        self._style_axes()
 
-        # График 1: Гистограмма времени в очереди
-        if self.sim.wait_times_data:
-            self.ax_hist.hist(self.sim.wait_times_data, bins=15, color='#CBA6F7', edgecolor='#181825', alpha=0.8)
+        # ── Гистограмма ───────────────────────────────────────────────────────
+        data = self.sim.wait_times_data
+        if data:
+            n_bins = min(30, max(8, len(data) // 40))
+            n_vals, bins, patches = self.ax_hist.hist(
+                data, bins=n_bins, density=True,
+                edgecolor="#0b0b1a", linewidth=0.5, alpha=0)
 
-        # График 2: Полигон частот (число клиентов в системе)
-        if self.sim.system_states_data:
-            # Подсчет частот каждого состояния системы
-            counts = Counter(self.sim.system_states_data)
-            states = sorted(counts.keys())
-            frequencies = [counts[s] for s in states]
-            
-            self.ax_poly.plot(states, frequencies, marker='o', color='#A6E3A1', linestyle='-', linewidth=2, markersize=5)
-            self.ax_poly.fill_between(states, frequencies, color='#A6E3A1', alpha=0.15)
-            # Принудительно делаем шаг по оси X целым числом
-            self.ax_poly.set_xticks(range(min(states), max(states) + 1))
+            max_n = max(n_vals) if n_vals.max() > 0 else 1
+            for patch, height in zip(patches, n_vals):
+                t = height / max_n
+                r_ = int(79  + t * (180 - 79))
+                g_ = int(195 + t * (100 - 195))
+                b_ = int(247 + t * (200 - 247))
+                patch.set_facecolor(QColor(r_, g_, b_).name())
+                patch.set_alpha(0.82)
+
+            avg = sum(data) / len(data)
+            self.ax_hist.axvline(
+                avg, color=NEON_PINK,
+                linestyle="--", linewidth=1.8, alpha=0.9,
+                label=f"Среднее: {avg:.2f} с")
+
+            # KDE
+            if len(data) > 5:
+                mn, mx = min(data), max(data)
+                xs = [mn + (mx - mn) * i / 200 for i in range(201)]
+                var = sum((x - avg)**2 for x in data) / len(data)
+                bw  = max(1.06 * var**0.5 * len(data)**(-0.2), 1e-6)
+                k   = 1.0 / (len(data) * bw * (2 * math.pi)**0.5)
+                ys  = [k * sum(
+                    math.exp(-0.5 * ((xi - d) / bw)**2)
+                    for d in data) for xi in xs]
+                self.ax_hist.plot(
+                    xs, ys, color=NEON_CYAN,
+                    linewidth=1.8, alpha=0.9, label="KDE")
+                self.ax_hist.fill_between(
+                    xs, ys, color=NEON_CYAN, alpha=0.06)
+
+            self.ax_hist.legend(
+                facecolor="#0d0d20", edgecolor=BORDER,
+                labelcolor=TEXT_PRI, fontsize=8)
+
+        # ── Полигон состояний ─────────────────────────────────────────────────
+        sd = self.sim.state_durations
+        T  = self.sim.current_time
+        if sd and T > 0:
+            states = sorted(sd.keys())
+            probs  = [sd[s] / T for s in states]
+
+            self.ax_poly.fill_between(
+                states, probs, color=NEON_GREEN, alpha=0.08)
+            self.ax_poly.plot(
+                states, probs,
+                color=NEON_GREEN, linewidth=2.2,
+                marker="o", markersize=6,
+                markerfacecolor=BG_DEEP,
+                markeredgecolor=NEON_GREEN,
+                markeredgewidth=2,
+                label="$p_k$")
+
+            for s, prob in zip(states, probs):
+                self.ax_poly.plot(
+                    [s, s], [0, prob],
+                    color=NEON_GREEN, linewidth=0.6, alpha=0.28)
+
+            max_p = max(probs)
+            max_s = states[probs.index(max_p)]
+            y_lim = self.ax_poly.get_ylim()[1]
+            max_p = max(probs)
+            max_s = states[probs.index(max_p)]
+            y_lim = self.ax_poly.get_ylim()[1]
+
+            # 1. Делаем отступ мощным (подберите коэффициент от 0.80 до 1.2, либо задайте константу)
+            offset = (y_lim - max_p) * 0.95 
+
+            self.ax_poly.annotate(
+                f"p={max_p:.3f}",
+                xy=(max_s, max_p),
+                xytext=(max_s, max_p - offset),
+                color=NEON_AMBER, fontsize=7, 
+                ha="center", 
+                va="top",         # <-- КРИТИЧНО: привязывает стрелку к верху текста, отодвигая буквы вниз
+                arrowprops=dict(
+                    arrowstyle="->",
+                    color=NEON_AMBER, lw=1.1,
+                    shrinkA=2,    # небольшой отступ от самого маркера
+                    shrinkB=5     # небольшой отступ от текста, чтобы стрелка не липла к буквам
+                )
+            )
+
+            self.ax_poly.set_xticks(
+                range(int(min(states)), int(max(states)) + 1))
+            self.ax_poly.legend(
+                facecolor="#0d0d20", edgecolor=BORDER,
+                labelcolor=TEXT_PRI, fontsize=8)
 
         self.canvas.draw()
-        
-        # 3. Обновление текстовой статистики
-        self.update_stats_ui()
+        self._update_cards()
 
-    def update_stats_ui(self):
-        if not self.sim: return
+    def _update_cards(self):
+        if not self.sim:
+            return
         st = self.sim.get_stats()
-        
         self.cards["arr"].set_value(st["arrived"])
         self.cards["proc"].set_value(st["processed"])
         self.cards["rej"].set_value(st["rejected"])
         self.cards["abn"].set_value(st["abandoned"])
         self.cards["p_rej"].set_value(f"{st['p_rej']:.1f}%")
         self.cards["p_abn"].set_value(f"{st['p_abn']:.1f}%")
-        self.cards["time"].set_value(f"{st['time']:.1f}")
         self.cards["avg_q"].set_value(f"{st['avg_q']:.2f}")
+        self.cards["time"].set_value(f"{st['time']:.1f}")
 
+
+# ── Точка входа ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = AdvancedSMOApp()
-    window.show()
+    app.setStyle("Fusion")
+    w = AdvancedSMOApp()
+    w.show()
     sys.exit(app.exec())
